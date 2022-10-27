@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Deploy a service on AWS Fargate, hosted in a public subnet, and accessible via a public load balancer.
+Description: Deploy a service on AWS Fargate, hosted in a private subnet, but accessible via a public load balancer.
 Parameters:
   StackName:
     Type: String
@@ -12,7 +12,7 @@ Parameters:
     Description: A name for the service
   ImageUrl:
     Type: String
-    Default: ""
+    Default: nginx
     Description: The url of a docker image that contains the application process that
                  will handle the traffic for this service
   ContainerPort:
@@ -105,9 +105,9 @@ Resources:
                 !Join [':', [!Ref 'StackName', 'FargateContainerSecurityGroup']]
           Subnets:
             - Fn::ImportValue:
-                !Join [':', [!Ref 'StackName', 'PublicSubnetOne']]
+                !Join [':', [!Ref 'StackName', 'PrivateSubnetOne']]
             - Fn::ImportValue:
-                !Join [':', [!Ref 'StackName', 'PublicSubnetTwo']]
+                !Join [':', [!Ref 'StackName', 'PrivateSubnetTwo']]
       TaskDefinition: !Ref 'TaskDefinition'
       LoadBalancers:
         - ContainerName: !Ref 'ServiceName'
