@@ -1,0 +1,619 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >
+  Sysdig Fargate Serverless Agent (3.0.3-rc AgentVer:3.0.3-rc77 Rev:ea812bb).
+  Stack running both the Serverless Instrumentation and the Orchestration Agent.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: Sysdig Settings
+        Parameters:
+          - SysdigAccessKey
+          - SysdigCollectorHost
+          - SysdigCollectorPort
+      -
+        Label:
+          default: Network Settings
+        Parameters:
+          - VPC
+          - Gateway
+          - SubnetA
+          - SubnetB
+      -
+        Label:
+          default: Instrumentation Settings
+        Parameters:
+          - SysdigMacroName
+          - SysdigServerlessInstrumentationImage
+          - SysdigWorkloadAgentImage
+          - SysdigInstrumentationLogging
+      -
+        Label:
+          default: Advanced Orchestrator Settings
+        Parameters:
+          - SysdigAgentTags
+          - SysdigOrchestratorAgentImage
+          - SysdigCheckCollectorCertificate
+          - SysdigOrchestratorAgentPort
+    ParameterLabels:
+      # Sysdig Settings
+      SysdigAccessKey:
+        default: Sysdig Access Key
+      SysdigCollectorHost:
+        default: Sysdig Collector Host
+      SysdigCollectorPort:
+        default: Sysdig Collector Port
+      # Network Settings
+      VPC:
+        default: VPC Id
+      Gateway:
+        default: VPC Gateway
+      SubnetA:
+        default: Subnet A
+      SubnetB:
+        default: Subnet B
+      # Instrumentation Settings
+      SysdigMacroName:
+        default: Macro Name
+      SysdigServerlessInstrumentationImage:
+        default: Sysdig Serverless Instrumentation Image
+      SysdigWorkloadAgentImage:
+        default: Sysdig Workload Agent Image
+      SysdigInstrumentationLogging:
+        default: Sysdig Instrumentation Logging Level
+      # Advanced Orchestrator Settings
+      SysdigAgentTags:
+        default: Agent Tags
+      SysdigOrchestratorAgentImage:
+        default: Sysdig Orchestrator Agent Image
+      SysdigCheckCollectorCertificate:
+        default: Check Collector SSL Certificate
+      SysdigOrchestratorAgentPort:
+        default: Sysdig Orchestrator Agent Port
+
+Parameters:
+  # Sysdig Settings
+  SysdigAccessKey:
+    Type: String
+
+  SysdigCollectorHost:
+    Type: String
+    Default: collector.sysdigcloud.com
+
+  SysdigCollectorPort:
+    Type: String
+    Default: 6443
+    AllowedPattern: ^[0-9]+$
+    ConstraintDescription: Sysdig Collector Port must be a number
+
+  # Network Settings
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC where your service is deployed
+
+  Gateway:
+    Type: String
+    AllowedValues:
+      - Internet Gateway  # Used in condition ConditionIsInternetGateway
+      - NAT Gateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet::Id
+    Description: A subnet that can access internet and is reachable by instrumented services
+
+  SubnetB:
+    Type: AWS::EC2::Subnet::Id
+    Description: A subnet that can access internet and is reachable by instrumented services
+
+  # Instrumentation Settings
+  SysdigMacroName:
+    Type: String
+    Description: Must be unique within your account
+    AllowedPattern: ^[A-Za-z0-9]+$
+    Default: SysdigMacro
+    ConstraintDescription: Macro Name can include only letters (A-Z and a-z) and numbers (0-9)
+
+  SysdigServerlessInstrumentationImage:
+    Type: String
+    Default: quay.io/sysdig/serverless-instrumentation:latest
+
+  SysdigWorkloadAgentImage:
+    Type: String
+    Default: quay.io/sysdig/workload-agent:latest
+
+  SysdigInstrumentationLogging:
+    Type: String
+    Default: "info"
+    AllowedValues:
+      - "silent"
+      - "error"
+      - "warning"
+      - "info"
+      - "debug"
+      - "trace"
+
+  # Advanced Orchestrator Settings
+  SysdigAgentTags:
+    Type: String
+    Description: Enter a comma-separated list of tags (e.g. role:webserver,location:europe)
+    Default: ""
+
+  SysdigOrchestratorAgentImage:
+    Type: String
+    Default: quay.io/sysdig/orchestrator-agent:latest
+
+  SysdigCheckCollectorCertificate:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+  SysdigOrchestratorAgentPort:
+    Type: String
+    Description: Port that the orchestrator and workload will use to communicate
+    Default: 6667
+    AllowedPattern: ^[0-9]+$
+    ConstraintDescription: Sysdig Orchestrator Agent Port must be a number
+
+Mappings:
+  Kilt:
+    Workload:
+      SysdigWorkloadDirectConnection: "false"
+      SysdigOverrideKiltRecipeS3Uri: ""
+      SysdigOverrideKiltCodeS3Uri: ""
+      SysdigOverrideKiltConfigJson: ""
+      SysdigKiltOperationMode: "OptOut"
+    S3Bucket:
+      SysdigKeyKiltRecipe: "cfn-macro.kilt.cfg"
+      SysdigKeyLambdaCode: "kilt.zip"
+
+Conditions:
+  ConditionIsInternetGateway: !Equals [!Ref Gateway, "Internet Gateway"]
+  ConditionIsKiltModeOptIn: !Equals [!FindInMap [Kilt, Workload, SysdigKiltOperationMode], "OptIn"]
+  ConditionOverrideKiltRecipe: !Not [ !Equals [!FindInMap [Kilt, Workload, SysdigOverrideKiltRecipeS3Uri], ""] ]
+  ConditionOverrideKiltCode: !Not [ !Equals [!FindInMap [Kilt, Workload, SysdigOverrideKiltCodeS3Uri], ""] ]
+  ConditionOverrideKiltConfig: !Not [ !Equals [!FindInMap [Kilt, Workload, SysdigOverrideKiltConfigJson], ""] ]
+  ConditionWorkloadDirectConnection: !Equals [!FindInMap [Kilt, Workload, SysdigWorkloadDirectConnection], "true" ]
+  ConditionDeployOrchestrator: !Not [ Condition: ConditionWorkloadDirectConnection ]
+
+Outputs:
+  SysdigTransformationMacro:
+    Description: Use this transformation macro in your template to automatically instrument it
+    Value: !Join
+      - ''
+      - - 'Transform: ["'
+        - !Ref SysdigMacroName
+        - '"]'
+
+Resources:
+  SysdigServerlessLogGroup:
+    Type: AWS::Logs::LogGroup
+    # DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: 365
+
+  #####################################
+  # Instrumentation and Orchestration #
+  #####################################
+  SysdigInstrumentationOrchestrationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigInstrumentationOrchestrationTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              # Permissions given in the default iam role for ecs tasks
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:BatchGetImage"
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "s3:*Object"
+                  - "s3:ListBucket"
+                  - "sqs:*"
+                Resource: "*"
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigInstrumentationTask:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - SysdigServerlessLogGroup
+      - SysdigQueue
+    Properties:
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 0.5GB
+      ExecutionRoleArn: !Ref SysdigInstrumentationOrchestrationExecutionRole
+      TaskRoleArn: !Ref SysdigInstrumentationOrchestrationTaskRole
+      ContainerDefinitions:
+        - Name: ServerlessInstrumentation
+          Image: !Ref SysdigServerlessInstrumentationImage
+          Environment:
+            - Name: LOG_LEVEL
+              Value: INFO
+            - Name: REGION
+              Value: !Ref AWS::Region
+            - Name: BUCKET_NAME
+              Value: !Ref SysdigBucket
+            - Name: URL_SQS_QUEUE
+              Value: !Ref SysdigQueue
+            - Name: ARN_TOPIC_KILT_RECIPE
+              Value: !Ref SysdigTopicKiltRecipe
+            - Name: ARN_TOPIC_KILT_CODE
+              Value: !Ref SysdigTopicLambdaCode
+            - Name: S3_KEY_KILT_RECIPE
+              Value: !FindInMap [Kilt, S3Bucket, SysdigKeyKiltRecipe]
+            - Name: S3_KEY_KILT_CODE
+              Value: !FindInMap [Kilt, S3Bucket, SysdigKeyLambdaCode]
+            - Name: S3_URI_KILT_RECIPE_OVERRIDE
+              Value: !If [ ConditionOverrideKiltRecipe, !FindInMap [Kilt, Workload, SysdigOverrideKiltRecipeS3Uri], !Ref AWS::NoValue ]
+            - Name: S3_URI_KILT_CODE_OVERRIDE
+              Value: !If [ ConditionOverrideKiltCode, !FindInMap [Kilt, Workload, SysdigOverrideKiltCodeS3Uri], !Ref AWS::NoValue ]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref SysdigServerlessLogGroup
+              awslogs-stream-prefix: ecs
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigOrchestrationTask:
+    Condition: ConditionDeployOrchestrator
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - SysdigServerlessLogGroup
+    Properties:
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 2048
+      Memory: 8GB
+      ExecutionRoleArn: !Ref SysdigInstrumentationOrchestrationExecutionRole
+      TaskRoleArn: !Ref SysdigInstrumentationOrchestrationTaskRole
+      ContainerDefinitions:
+        - Name: OrchestratorAgent
+          Image: !Ref SysdigOrchestratorAgentImage
+          Environment:
+            - Name: ACCESS_KEY
+              Value: !Ref SysdigAccessKey
+            - Name: COLLECTOR
+              Value: !Ref SysdigCollectorHost
+            - Name: COLLECTOR_PORT
+              Value: !Ref SysdigCollectorPort
+            - Name: TAGS
+              Value: !Ref SysdigAgentTags
+            - Name: CHECK_CERTIFICATE
+              Value: !Ref SysdigCheckCollectorCertificate
+            - Name: SYSDIG_ORCHESTRATOR_PORT
+              Value: !Ref SysdigOrchestratorAgentPort
+          PortMappings:
+            - ContainerPort: !Ref SysdigOrchestratorAgentPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref SysdigServerlessLogGroup
+              awslogs-stream-prefix: ecs
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: !Ref SysdigOrchestratorAgentPort
+      Protocol: TCP
+      TargetType: ip
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  # default is 300
+      VpcId: !Ref VPC
+
+  SysdigLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Scheme: internet-facing
+      Type: network
+      Subnets:
+        - !Ref SubnetA
+        - !Ref SubnetB
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref SysdigTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref SysdigLoadBalancer
+      Port: !Ref SysdigOrchestratorAgentPort
+      Protocol: TCP
+
+  SysdigInstrumentationOrchestrationCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigInstrumentationOrchestrationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow agentino to connect
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref SysdigOrchestratorAgentPort
+          ToPort: !Ref SysdigOrchestratorAgentPort
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigInstrumentationService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - SysdigBucket
+    Properties:
+      ServiceName: SysdigInstrumentationService
+      Cluster: !Ref SysdigInstrumentationOrchestrationCluster
+      TaskDefinition: !Ref SysdigInstrumentationTask
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !If [ ConditionIsInternetGateway, 'ENABLED', 'DISABLED' ]
+          Subnets:
+            - !Ref SubnetA
+            - !Ref SubnetB
+          SecurityGroups:
+            - !Ref SysdigInstrumentationOrchestrationSecurityGroup
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  SysdigOrchestrationService:
+    Condition: ConditionDeployOrchestrator
+    Type: AWS::ECS::Service
+    DependsOn:
+      - SysdigLoadBalancerListener
+      - SysdigInstrumentationService
+    Properties:
+      ServiceName: SysdigOrchestrationService
+      Cluster: !Ref SysdigInstrumentationOrchestrationCluster
+      TaskDefinition: !Ref SysdigOrchestrationTask
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: !If [ ConditionIsInternetGateway, 'ENABLED', 'DISABLED' ]
+          Subnets:
+            - !Ref SubnetA
+            - !Ref SubnetB
+          SecurityGroups:
+            - !Ref SysdigInstrumentationOrchestrationSecurityGroup
+      LoadBalancers:
+        - ContainerName: OrchestratorAgent
+          ContainerPort: !Ref SysdigOrchestratorAgentPort
+          TargetGroupArn: !Ref SysdigTargetGroup
+      Tags:
+        - Key: application
+          Value: sysdig
+
+  ########################################
+  # Resources supporting Instrumentation #
+  ########################################
+  SysdigBucket:
+    Type: AWS::S3::Bucket
+
+  SysdigQueue:
+    Type: AWS::SQS::Queue
+    DependsOn: SysdigBucket
+
+  SysdigQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    DependsOn: SysdigQueue
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 'sqs:SendMessage'
+            Resource: !GetAtt
+              - SysdigQueue
+              - Arn
+      Queues:
+        - Ref: SysdigQueue
+
+  SysdigSubscriptionKiltRecipe:
+    Type: AWS::SNS::Subscription
+    DependsOn: SysdigQueue
+    Properties:
+      TopicArn: !Ref SysdigTopicKiltRecipe
+      Endpoint: !GetAtt
+        - SysdigQueue
+        - Arn
+      Protocol: sqs
+
+  SysdigTopicKiltRecipe:
+    Type: AWS::SNS::Topic
+
+  SysdigCustomResourceKiltRecipe:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - SysdigTopicKiltRecipe
+      - SysdigSubscriptionKiltRecipe
+      - SysdigQueue
+      - SysdigQueuePolicy
+    Properties:
+      ServiceToken: !Ref SysdigTopicKiltRecipe
+
+  SysdigSubscriptionLambdaCode:
+    Type: AWS::SNS::Subscription
+    DependsOn: SysdigQueue
+    Properties:
+      TopicArn: !Ref SysdigTopicLambdaCode
+      Endpoint: !GetAtt
+        - SysdigQueue
+        - Arn
+      Protocol: sqs
+
+  SysdigTopicLambdaCode:
+    Type: AWS::SNS::Topic
+
+  SysdigCustomResourceLambdaCode:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - SysdigTopicLambdaCode
+      - SysdigSubscriptionLambdaCode
+      - SysdigQueue
+      - SysdigQueuePolicy
+    Properties:
+      ServiceToken: !Ref SysdigTopicLambdaCode
+
+  ####################################
+  # Instrumentation Lambda and Macro #
+  ####################################
+  KiltRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:*Object
+                Resource: !Join
+                  - ''
+                  - - Fn::GetAtt:
+                      - SysdigBucket
+                      - Arn
+                    - '/*'
+
+  KiltLambda:
+    Type: AWS::Lambda::Function
+    DependsOn:
+     - SysdigCustomResourceKiltRecipe
+     - SysdigCustomResourceLambdaCode
+    Properties:
+      Runtime: go1.x
+      Handler: handler
+      Role:
+        Fn::GetAtt:
+          - KiltRole
+          - Arn
+      Environment:
+        Variables:
+          KILT_DEFINITION_TYPE: s3
+          KILT_DEFINITION: !Join
+            - ''
+            - - !Ref SysdigBucket
+              - '/'
+              - !FindInMap [Kilt, S3Bucket, SysdigKeyKiltRecipe]
+          KILT_OPT_IN: !If [ ConditionIsKiltModeOptIn, 'YES', !Ref AWS::NoValue ]
+          KILT_RECIPE_CONFIG: !If
+            - ConditionOverrideKiltConfig
+            - !FindInMap [Kilt, Workload, SysdigOverrideKiltConfigJson]
+            - !Join
+              - ''
+              - - '{'
+                - '"orchestrator_host":"'
+                - !If [ ConditionWorkloadDirectConnection, "", !GetAtt SysdigLoadBalancer.DNSName ]
+                - '","orchestrator_port":"'
+                - !If [ ConditionWorkloadDirectConnection, "", !Ref SysdigOrchestratorAgentPort ]
+                - '","sysdig_access_key":"'
+                - !If [ ConditionWorkloadDirectConnection, !Ref SysdigAccessKey, "" ]
+                - '","collector_host":"'
+                - !If [ ConditionWorkloadDirectConnection, !Ref SysdigCollectorHost, "" ]
+                - '","collector_port":"'
+                - !If [ ConditionWorkloadDirectConnection, !Ref SysdigCollectorPort, "" ]
+                - '","agent_image":"'
+                - !Ref SysdigWorkloadAgentImage
+                - '","sysdig_logging":"'
+                - !Ref SysdigInstrumentationLogging
+                - '"}'
+          KILT_LOG_GROUP: !Ref SysdigServerlessLogGroup
+      Code:
+        S3Bucket: !Ref SysdigBucket
+        S3Key: !FindInMap [Kilt, S3Bucket, SysdigKeyLambdaCode]
+
+  KiltMacro:
+    Type: AWS::CloudFormation::Macro
+    Properties:
+      Name: !Ref SysdigMacroName
+      Description: !Join
+        - ''
+        - - 'Kilt - Applies kilt patching in s3://'
+          - !Ref SysdigBucket
+          - '/'
+          - !Ref SysdigMacroName
+          - ' to fargate tasks'
+      FunctionName:
+        Fn::GetAtt:
+          - KiltLambda
+          - Arn
